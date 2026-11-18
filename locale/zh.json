@@ -1,7 +1,43 @@
 {
   "meta": {
     "title": "文件资料库",
-    "description": "搜索你发送给 DSH 的每一个文件，查看原始文件名和来源会话，一键复用。",
+    "description": "搜索你发送给 DSH 的文件，无需复制即可查看，一键复用。",
     "detail": "docs/DETAIL.md"
+  },
+  "strings": {
+    "scope": {
+      "group": "文件范围",
+      "workspace": "本工作区",
+      "all": "全部文件",
+      "workspaceCount": "{shown} / {total} 个文件",
+      "allCount": "{shown} 个文件",
+      "workspaceOnlyHint": "仅列出属于当前会话工作区的文件。"
+    },
+    "scopeFallback": {
+      "no-session": "已改为显示全部文件——此标签页没有关联会话。",
+      "invalid-session": "已改为显示全部文件——会话标识不可用。",
+      "unknown-session": "已改为显示全部文件——无法解析该会话的工作区。",
+      "http-404": "已改为显示全部文件——主机未返回按工作区过滤的列表。"
+    },
+    "coverage": {
+      "truncated": "索引覆盖了 {found} 个会话中的 {seen} 个。",
+      "truncatedUnknown": "部分会话因扫描上限未被索引。"
+    },
+    "actions": {
+      "open": "打开",
+      "preview": "预览",
+      "missing": "已缺失 · 字节已不在本机"
+    },
+    "reuse": {
+      "rule": "查看用流式读取，编辑再存副本。",
+      "footer": "「打开」直接从附件库流式读取原件；「存到工作区」会复制一份到 library/ 以便编辑。"
+    },
+    "empty": {
+      "workspaceTitle": "本工作区还没有文件",
+      "workspaceBody": "在此对话中发送的文件会出现在这里；在其他对话中发送的文件可在「全部文件」中一键查看。",
+      "workspaceAction": "查看全部文件",
+      "libraryTitle": "资料库还是空的",
+      "libraryBody": "你发送给 DSH 的文件都保存在共享附件库中。在任意对话中发送 PDF、图片、文档或表格，它就会带着原始文件名出现在这里，可搜索、可复用。"
+    }
   }
 }

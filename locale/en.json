@@ -1,7 +1,43 @@
 {
   "meta": {
     "title": "File library",
-    "description": "Search every file you have sent to DSH, see its original name and source chat, and reuse it in one click.",
+    "description": "Search the files you have sent to DSH, view any of them without copying, and reuse them in one click.",
     "detail": "docs/DETAIL.md"
+  },
+  "strings": {
+    "scope": {
+      "group": "File scope",
+      "workspace": "This workspace",
+      "all": "All files",
+      "workspaceCount": "{shown} of {total} files",
+      "allCount": "{shown} files",
+      "workspaceOnlyHint": "Only files belonging to this session's workspace are listed."
+    },
+    "scopeFallback": {
+      "no-session": "Showing all files instead — no session is attached to this tab.",
+      "invalid-session": "Showing all files instead — the session id is not usable.",
+      "unknown-session": "Showing all files instead — this session has no resolvable workspace.",
+      "http-404": "Showing all files instead — the host did not return a scoped list."
+    },
+    "coverage": {
+      "truncated": "The index covers {seen} of {found} sessions.",
+      "truncatedUnknown": "Some sessions were not indexed because of scan limits."
+    },
+    "actions": {
+      "open": "Open",
+      "preview": "Preview",
+      "missing": "Missing · bytes are gone"
+    },
+    "reuse": {
+      "rule": "Stream or read to view, file a copy to edit.",
+      "footer": "“Open” streams the original from the attachment store; “File this” copies one into library/ to edit."
+    },
+    "empty": {
+      "workspaceTitle": "No files in this workspace yet",
+      "workspaceBody": "Files you send in this chat land here. Everything sent in other chats stays one click away under All files.",
+      "workspaceAction": "Show all files",
+      "libraryTitle": "Your file library is empty",
+      "libraryBody": "Everything you send to DSH is kept in a shared attachment store. Send a PDF, image, document or spreadsheet in any chat and it appears here with its original name, ready to search and reuse."
+    }
   }
 }

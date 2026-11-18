@@ -168,3 +168,126 @@ test('a prefixed deployment builds same-origin URLs under the prefix', async () 
     else globalThis.document = previous
   }
 })
+
+test('the header defaults to this workspace and offers the all-files switch', async () => {
+  const api = await loadClient()
+  const model = api.__internals.buildModel({ entries: [entry({})], totalAll: 5, width: 900, now: NOW })
+  assert.equal(model.scope, 'workspace')
+  assert.equal(model.totalAll, 5)
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /data-dfl-scope="workspace"/)
+  assert.match(html, /data-dfl-scope="all"/)
+  assert.match(html, /class="dfl-scope-btn is-active" aria-pressed data-dfl-scope="workspace">This workspace/)
+  assert.match(html, /class="dfl-scope-btn" data-dfl-scope="all">All files/)
+  assert.match(html, /1 of 5 files/)
+  assert.match(html, /data-dfl-total-all="5"/)
+
+  const wide = api.__internals.buildModel({ entries: [entry({})], totalAll: 5, scope: 'all', width: 900, now: NOW })
+  assert.equal(wide.scope, 'all')
+  const allHtml = serialize(api.__internals.buildView(wide))
+  assert.match(allHtml, /class="dfl-scope-btn" data-dfl-scope="workspace">This workspace/)
+  assert.match(allHtml, /class="dfl-scope-btn is-active" aria-pressed data-dfl-scope="all">All files/)
+})
+
+test('an empty workspace view offers the all-files escape hatch', async () => {
+  const api = await loadClient()
+  const model = api.__internals.buildModel({ entries: [], totalAll: 4, width: 700, now: NOW })
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /data-dfl-empty-state="workspace-empty"/)
+  assert.match(html, /No files in this workspace yet/)
+  assert.match(html, /data-dfl-switch-scope="all"/)
+  assert.match(html, /Show all files/)
+  assert.match(html, /holds 4 files sent in other chats/)
+
+  const trulyEmpty = api.__internals.buildModel({ entries: [], totalAll: 0, width: 700, now: NOW })
+  assert.match(serialize(api.__internals.buildView(trulyEmpty)), /data-dfl-empty-state="library-empty"/)
+})
+
+test('a scope fallback is surfaced instead of silently listing every file', async () => {
+  const api = await loadClient()
+  const model = api.__internals.buildModel({
+    entries: [entry({})], scope: 'all', scopeFallback: 'unknown-session', totalAll: 9, width: 800, now: NOW,
+  })
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /data-dfl-scope-fallback="unknown-session"/)
+  assert.match(html, /Showing all files instead — this session has no resolvable workspace\./)
+  assert.equal(api.__internals.scopeFallbackText('http-404'), 'Showing all files instead — the host did not return a scoped list.')
+})
+
+test('the scope is sent as a name and the choice is remembered', async () => {
+  const api = await loadClient()
+  assert.equal(api.__internals.SCOPE_STORAGE_KEY, 'dsh-file-library:scope')
+  assert.equal(api.__internals.indexQuery('session-1', 'workspace'), 'index?sessionId=session-1&scope=workspace&limit=2000')
+  assert.equal(api.__internals.indexQuery('a b', 'all'), 'index?sessionId=a%20b&scope=all&limit=2000')
+  assert.equal(api.__internals.indexQuery('session-1', null), 'index?sessionId=session-1&scope=workspace&limit=2000')
+
+  assert.equal(api.__internals.readScopePreference(), 'workspace')
+  const store = {
+    value: null,
+    getItem() { return this.value },
+    setItem(_key, next) { this.value = next },
+  }
+  assert.equal(api.__internals.saveScopePreference('all', store), 'all')
+  assert.equal(api.__internals.readScopePreference(store), 'all')
+  assert.equal(api.__internals.saveScopePreference('workspace', store), 'workspace')
+  assert.equal(api.__internals.readScopePreference(store), 'workspace')
+
+  const denied = {
+    getItem() { throw new Error('denied') },
+    setItem() { throw new Error('denied') },
+  }
+  assert.equal(api.__internals.readScopePreference(denied), 'workspace')
+  assert.equal(api.__internals.saveScopePreference('all', denied), 'all')
+})
+test('the Open action points at /object/<sha> and never files anything', async () => {
+  const api = await loadClient()
+  const sha = 'd'.repeat(64)
+  assert.equal(api.__internals.objectUrl(sha), `/plugins/dsh-file-library/object/${sha}`)
+  const pdf = entry({ sha256: sha })
+  const html = serialize(api.__internals.buildView(api.__internals.buildModel({
+    entries: [pdf], width: 900, now: NOW,
+  })))
+  assert.match(html, new RegExp(`data-dfl-open="${sha}"`))
+  assert.match(html, />Preview</)
+  assert.match(html, /“Open” streams the original from the attachment store/)
+  const doc = serialize(api.__internals.buildView(api.__internals.buildModel({
+    entries: [entry({ sha256: 'e'.repeat(64), name: 'notes.docx', kind: 'doc', ext: 'docx' })], width: 900, now: NOW,
+  })))
+  assert.match(doc, />Open</)
+})
+
+test('a missing row is marked and its Open and Use actions are disabled', async () => {
+  const api = await loadClient()
+  const gone = entry({ sha256: 'f'.repeat(64), state: 'missing' })
+  const html = serialize(api.__internals.buildView(api.__internals.buildModel({
+    entries: [gone], width: 900, now: NOW,
+  })))
+  assert.match(html, /data-dfl-state="missing"/)
+  assert.match(html, /data-dfl-missing="1"/)
+  assert.match(html, /Missing · bytes are gone/)
+  assert.match(html, /data-dfl-open="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"[^>]*disabled/)
+})
+
+test('a truncated scan shows the coverage banner, with counts when known', async () => {
+  const api = await loadClient()
+  assert.equal(
+    api.__internals.coverageText({ truncated: true, sessionsSeen: 70, sessionsFound: 120 }),
+    'The index covers 70 of 120 sessions.',
+  )
+  assert.equal(
+    api.__internals.coverageText({ truncated: true }),
+    'Some sessions were not indexed because of scan limits.',
+  )
+  const html = serialize(api.__internals.buildView(api.__internals.buildModel({
+    entries: [entry({})], width: 900, now: NOW,
+    coverage: { truncated: true, sessionsSeen: 70, sessionsFound: 120 },
+  })))
+  assert.match(html, /data-dfl-coverage="truncated"/)
+  assert.match(html, /The index covers 70 of 120 sessions\./)
+
+  const quiet = serialize(api.__internals.buildView(api.__internals.buildModel({
+    entries: [entry({})], width: 900, now: NOW,
+    coverage: { truncated: false, sessionsSeen: 120, sessionsFound: 120 },
+  })))
+  assert.doesNotMatch(quiet, /data-dfl-coverage/)
+})

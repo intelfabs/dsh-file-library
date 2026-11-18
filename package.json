@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-library",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": false,
   "description": "A searchable library of every file ever sent to DeepSeek Harness, with one-click filing into the session workspace and reuse in any chat.",
   "license": "MIT",
@@ -45,7 +45,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "test": "node --test test/index.test.mjs test/filing.test.mjs test/routes.test.mjs test/client.test.mjs test/host-smoke.test.mjs test/plugin.test.mjs",
+    "test": "node --test test/index.test.mjs test/filing.test.mjs test/routes.test.mjs test/client.test.mjs test/tools.test.mjs test/host-smoke.test.mjs test/plugin.test.mjs",
     "pack:dry": "npm pack --dry-run"
   },
   "dsh": {

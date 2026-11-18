@@ -31,7 +31,7 @@ test('the host entry registers one prefix route and both agent tools', async () 
   assert.equal(routes[0].kind, 'prefix')
   assert.equal(routes[0].path, '/plugins/dsh-file-library')
   assert.equal(typeof routes[0].handler, 'function')
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['library_list', 'library_use'])
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['library_list', 'library_read', 'library_use'])
   for (const tool of tools) {
     assert.equal(typeof tool.description, 'string')
     assert.equal(typeof tool.execute, 'function')

@@ -1,4 +1,4 @@
-/* global window, document, fetch, navigator, ResizeObserver */
+/* global window, document, fetch, navigator, localStorage, ResizeObserver, Element */
 /**
  * dsh-file-library — browser half.
  *
@@ -20,6 +20,50 @@ window.__ModuleLoader__.load({
     const KINDS = ['all', 'pdf', 'image', 'doc', 'xlsx', 'zip', 'other']
     const KIND_LABEL = {
       all: 'All', pdf: 'PDF', image: 'Images', doc: 'Docs', xlsx: 'Sheets', zip: 'Archives', other: 'Other',
+    }
+
+    // One tab browses its own workspace by default; the whole-library view is
+    // an explicit second choice, remembered per browser for the next open.
+    const SCOPES = ['workspace', 'all']
+    const SCOPE_STORAGE_KEY = 'dsh-file-library:scope'
+    const SCOPE_FALLBACK_REASON = {
+      'no-session': 'no session is attached to this tab',
+      'invalid-session': 'the session id is not usable',
+      'unknown-session': 'this session has no resolvable workspace',
+      'http-404': 'the host did not return a scoped list',
+    }
+
+    function scopeStore(storage) {
+      if (storage !== undefined && storage !== null) return storage
+      return typeof localStorage === 'undefined' ? undefined : localStorage
+    }
+
+    /** The remembered scope for the library tab; defaults to this workspace. */
+    function readScopePreference(storage) {
+      const store = scopeStore(storage)
+      if (store === undefined) return 'workspace'
+      try {
+        return store.getItem(SCOPE_STORAGE_KEY) === 'all' ? 'all' : 'workspace'
+      } catch {
+        return 'workspace'
+      }
+    }
+
+    /** Persist the scope choice; denied storage (private mode) is not fatal. */
+    function saveScopePreference(scope, storage) {
+      const wanted = scope === 'all' ? 'all' : 'workspace'
+      const store = scopeStore(storage)
+      if (store === undefined) return wanted
+      try {
+        store.setItem(SCOPE_STORAGE_KEY, wanted)
+      } catch {
+        // The in-memory scope still applies for this page.
+      }
+      return wanted
+    }
+
+    function scopeFallbackText(reason) {
+      return `Showing all files instead — ${SCOPE_FALLBACK_REASON[reason] ?? reason}.`
     }
 
     let clientCtx = null
@@ -58,6 +102,15 @@ window.__ModuleLoader__.load({
         throw error
       }
       return body
+    }
+
+    /**
+     * The one index request the tab makes. `scope` is a name, never a path:
+     * the host resolves the workspace from the session id on its side.
+     */
+    function indexQuery(sessionId, scope) {
+      const wanted = scope === 'all' ? 'all' : 'workspace'
+      return `index?sessionId=${encodeURIComponent(sessionId)}&scope=${wanted}&limit=2000`
     }
 
     async function postJson(relative, payload) {
@@ -117,6 +170,22 @@ window.__ModuleLoader__.load({
       return apiUrl(`thumb/${sha}`)
     }
 
+    /** Raw bytes of one indexed object; opened in a new tab, never filed. */
+    function objectUrl(sha) {
+      return apiUrl(`object/${sha}`)
+    }
+
+    /** Banner text for a scan that stopped before every session. */
+    function coverageText(coverage) {
+      const value = coverage ?? {}
+      const found = Number(value.sessionsFound)
+      if (Number.isFinite(found) && found > 0) {
+        const seen = Number.isFinite(Number(value.sessionsSeen)) ? Number(value.sessionsSeen) : 0
+        return `The index covers ${seen} of ${found} sessions.`
+      }
+      return 'Some sessions were not indexed because of scan limits.'
+    }
+
     /* -------------------------------------------------------------- model -- */
 
     function countsByKind(entries) {
@@ -159,6 +228,10 @@ window.__ModuleLoader__.load({
         error: input.error ?? null,
         toast: input.toast ?? null,
         filedCount: Number(input.filedCount) || 0,
+        scope: input.scope === 'all' ? 'all' : 'workspace',
+        scopeFallback: typeof input.scopeFallback === 'string' && input.scopeFallback !== '' ? input.scopeFallback : null,
+        coverage: input.coverage ?? null,
+        totalAll: Number.isFinite(Number(input.totalAll)) ? Math.max(0, Math.trunc(Number(input.totalAll))) : entries.length,
         now: Number(input.now) || Date.now(),
         handlers: input.handlers ?? {},
         emptyLibrary: entries.length === 0,
@@ -207,6 +280,7 @@ window.__ModuleLoader__.load({
         'data-dfl-sha': entry.sha256,
         'data-dfl-name': entry.name,
         'data-dfl-kind': entry.kind,
+        'data-dfl-state': entry.state ?? 'global',
         onClick: event => handlers.onActivate?.(index, event),
         onDoubleClick: () => handlers.onUse?.(entry),
         onKeyDown: event => handlers.onCardKeyDown?.(event, index, entry),
@@ -228,7 +302,24 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dfl-source', title: entry.sessionTitle },
             relativeTime(entry.sentAt, model.now),
             entry.sessionTitle ? ` · ${entry.sessionTitle}` : ''),
-          entry.filed ? h('span', { className: 'dfl-filed' }, `Filed · library/${entry.name}`) : null))
+          entry.state === 'missing'
+            ? h('span', { className: 'dfl-missing', 'data-dfl-missing': '1' }, 'Missing · bytes are gone')
+            : null,
+          entry.filed ? h('span', { className: 'dfl-filed' }, `Filed · library/${entry.name}`) : null,
+          h('span', { className: 'dfl-actions' },
+            h('button', {
+              type: 'button',
+              className: 'dfl-open',
+              'data-dfl-open': entry.sha256,
+              title: entry.state === 'missing'
+                ? 'The bytes are missing from this host'
+                : `Open ${entry.name} in a new tab (nothing is copied)`,
+              disabled: entry.state === 'missing',
+              onClick: event => {
+                event.stopPropagation()
+                if (entry.state !== 'missing') handlers.onOpen?.(entry)
+              },
+            }, entry.kind === 'image' || entry.kind === 'pdf' ? 'Preview' : 'Open'))))
     }
 
     function emptyState(model) {
@@ -242,6 +333,17 @@ window.__ModuleLoader__.load({
             type: 'button', className: 'dfl-btn',
             onClick: () => model.handlers.onClearSearch?.(),
           }, 'Clear search'))
+      }
+      if (model.scope === 'workspace' && model.totalAll > 0) {
+        return h('div', { className: 'dfl-empty', 'data-dfl-empty-state': 'workspace-empty' },
+          h('div', { className: 'dfl-empty-glyph', 'aria-hidden': 'true' }, '▤'),
+          h('h3', null, 'No files in this workspace yet'),
+          h('p', null,
+            `The library holds ${model.totalAll} file${model.totalAll === 1 ? '' : 's'} sent in other chats. Send a file here and it is added to this workspace; the rest stay one click away.`),
+          h('button', {
+            type: 'button', className: 'dfl-btn is-primary', 'data-dfl-switch-scope': 'all',
+            onClick: () => model.handlers.onScope?.('all'),
+          }, 'Show all files'))
       }
       return h('div', { className: 'dfl-empty', 'data-dfl-empty-state': 'library-empty' },
         h('div', { className: 'dfl-empty-glyph', 'aria-hidden': 'true' }, '▤'),
@@ -284,6 +386,27 @@ window.__ModuleLoader__.load({
               type: 'button', className: 'dfl-icon-btn', title: 'Refresh index', 'aria-label': 'Refresh index',
               onClick: () => handlers.onRefresh?.(),
             }, '↻')),
+          h('div', { className: 'dfl-scope-row', role: 'group', 'aria-label': 'File scope' },
+            SCOPES.map(scope => h('button', {
+              type: 'button',
+              key: scope,
+              className: `dfl-scope-btn${model.scope === scope ? ' is-active' : ''}`,
+              'aria-pressed': model.scope === scope,
+              'data-dfl-scope': scope,
+              onClick: () => handlers.onScope?.(scope),
+            }, scope === 'workspace' ? 'This workspace' : 'All files')),
+            h('span', { className: 'dfl-scope-count', 'data-dfl-total-all': String(model.totalAll) },
+              model.scope === 'workspace'
+                ? `${model.allEntries.length} of ${model.totalAll} file${model.totalAll === 1 ? '' : 's'}`
+                : `${model.allEntries.length} file${model.allEntries.length === 1 ? '' : 's'}`)),
+          model.scopeFallback === null
+            ? null
+            : h('p', { className: 'dfl-scope-fallback', 'data-dfl-scope-fallback': model.scopeFallback, role: 'status' },
+              scopeFallbackText(model.scopeFallback)),
+          model.coverage?.truncated === true
+            ? h('p', { className: 'dfl-coverage', 'data-dfl-coverage': 'truncated', role: 'status' },
+              coverageText(model.coverage))
+            : null,
           h('div', { className: 'dfl-search-row' },
             h('input', {
               type: 'search',
@@ -324,8 +447,8 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'dfl-toast', role: 'status' }, model.toast)
           : null,
         h('footer', { className: 'dfl-foot' },
-          h('span', null, 'Files stay in the DSH attachment store; “File this” copies one into ',
-            h('code', null, 'library/'), '.'),
+          h('span', null, '“Open” streams the original from the attachment store; “File this” copies one into ',
+            h('code', null, 'library/'), ' to edit.'),
           activeEntry ? h('span', { className: 'dfl-foot-hint' }, 'Enter uses · / searches · Esc clears') : null))
     }
 
@@ -366,6 +489,7 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState({
         loading: true, error: null, entries: [], query: '', kind: 'all', view: 'grid',
         selected: [], active: 0, toast: null, filedCount: 0,
+        scope: readScopePreference(), scopeFallback: null, totalAll: 0, coverage: null,
       })
       const [width, setWidth] = useState(() => {
         if (typeof window !== 'undefined' && Number.isFinite(window.innerWidth)) return Math.min(1200, window.innerWidth)
@@ -374,23 +498,40 @@ window.__ModuleLoader__.load({
       const rootRef = useRef(null)
       const searchRef = useRef(null)
 
-      const load = useCallback(async () => {
+      const load = useCallback(async scopeArg => {
+        const asked = scopeArg === 'all' ? 'all' : 'workspace'
         setState(current => ({ ...current, loading: true, error: null }))
         try {
           let data
+          let httpFallback = null
           try {
-            data = await getJson(`index?sessionId=${encodeURIComponent(sessionId)}&limit=2000`)
+            data = await getJson(indexQuery(sessionId, asked))
           } catch (error) {
-            if (error?.status === 404) data = await getJson('index?limit=2000')
-            else throw error
+            if (error?.status !== 404) throw error
+            // Older host halves have no scope parameter; keep browsing, but
+            // say plainly that the list is not scoped.
+            data = await getJson('index?scope=all&limit=2000')
+            httpFallback = 'http-404'
           }
+          const entries = Array.isArray(data.entries) ? data.entries : []
+          const totalAll = Number.isFinite(Number(data.totalAll))
+            ? Math.max(0, Math.trunc(Number(data.totalAll)))
+            : entries.length
+          const effective = data.scope === 'workspace' ? 'workspace' : 'all'
+          const fallback = typeof data.scopeFallback === 'string' && data.scopeFallback !== ''
+            ? data.scopeFallback
+            : (effective === asked ? null : httpFallback)
           setState(current => ({
             ...current,
             loading: false,
             error: null,
-            entries: Array.isArray(data.entries) ? data.entries : [],
+            entries,
             filedCount: Number(data.filedCount) || 0,
-            selected: current.selected.filter(sha => (data.entries ?? []).some(entry => entry.sha256 === sha)),
+            scope: effective,
+            scopeFallback: fallback,
+            coverage: data.coverage ?? null,
+            totalAll,
+            selected: current.selected.filter(sha => entries.some(entry => entry.sha256 === sha)),
             active: 0,
           }))
         } catch (error) {
@@ -402,7 +543,7 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
-      useEffect(() => { void load() }, [load])
+      useEffect(() => { void load(state.scope) }, [load, state.scope])
 
       useEffect(() => {
         const element = rootRef.current
@@ -450,9 +591,13 @@ window.__ModuleLoader__.load({
       }, [sessionId])
 
       const useEntries = useCallback(async entries => {
-        if (entries.length === 0) return
+        const usable = entries.filter(entry => entry.state !== 'missing')
+        if (usable.length === 0) {
+          if (entries.length > 0) setState(current => notify(current, 'Those files are missing from this host, so nothing can be filed.'))
+          return
+        }
         const references = []
-        for (const entry of entries) {
+        for (const entry of usable) {
           const filed = await fileEntry(entry)
           if (filed !== null) references.push(filed.reference)
         }
@@ -503,7 +648,11 @@ window.__ModuleLoader__.load({
           onSearch: value => update({ query: value, active: 0 }),
           onKind: kind => update({ kind, active: 0 }),
           onView: view => update({ view }),
-          onRefresh: () => { void load() },
+          onRefresh: () => { void load(state.scope) },
+          onScope: scope => {
+            saveScopePreference(scope)
+            update({ scope: scope === 'all' ? 'all' : 'workspace', selected: [], active: 0 })
+          },
           onClearSearch: () => update({ query: '', kind: 'all', active: 0 }),
           onToggleSelect: toggleSelect,
           onClearSelection: () => update({ selected: [] }),
@@ -561,6 +710,19 @@ window.__ModuleLoader__.load({
             void useEntries(rows)
           },
           onUse: entry => { void useEntries([entry]) },
+          onOpen: entry => {
+            if (entry.state === 'missing') {
+              setState(current => notify(current, 'That file is missing from this host.'))
+              return
+            }
+            const url = objectUrl(entry.sha256)
+            try {
+              const opened = window.open(url, '_blank', 'noopener,noreferrer')
+              if (opened === null) setState(current => notify(current, 'Your browser blocked the new tab; allow pop-ups for this page.'))
+            } catch (error) {
+              setState(current => notify(current, `Could not open it: ${error instanceof Error ? error.message : String(error)}`))
+            }
+          },
         },
       })
 
@@ -577,6 +739,12 @@ window.__ModuleLoader__.load({
 .dfl-title{font-weight:600;font-size:14px;white-space:nowrap}
 .dfl-count{color:var(--dsw-alias-label-tertiary,inherit);font-size:12px;white-space:nowrap}
 .dfl-spacer{flex:1 1 auto}
+.dfl-scope-row{display:flex;align-items:center;gap:4px;min-width:0;flex-wrap:wrap}
+.dfl-scope-btn{appearance:none;border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-secondary,inherit);border-radius:6px;padding:2px 8px;font:inherit;font-size:11.5px;line-height:1.5;cursor:pointer;white-space:nowrap}
+.dfl-scope-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1))}
+.dfl-scope-btn.is-active{background:var(--dsw-alias-interactive-bg-hover,rgba(99,132,255,.14));border-color:var(--dsw-alias-border-accent,rgba(99,132,255,.55));color:var(--dsw-alias-label-primary,inherit)}
+.dfl-scope-count{margin-left:auto;color:var(--dsw-alias-label-tertiary,inherit);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dfl-scope-fallback{margin:0;color:var(--dsw-alias-label-tertiary,inherit);font-size:11px;line-height:1.5}
 .dfl-icon-btn{appearance:none;border:1px solid transparent;background:transparent;color:inherit;border-radius:6px;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;line-height:1;flex:none}
 .dfl-icon-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}
 .dfl-icon-btn[aria-pressed="true"]{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.16));border-color:var(--dsw-alias-border-l2-darkmode-thin,rgba(127,127,127,.22))}
@@ -618,6 +786,12 @@ window.__ModuleLoader__.load({
 .dfl-size{white-space:nowrap}
 .dfl-source{color:var(--dsw-alias-label-tertiary,inherit);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dfl-filed{color:var(--dsw-alias-state-success-primary,#2e8b57);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dfl-missing{color:var(--dsw-alias-state-error-primary,#c0392b);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dfl-actions{display:flex;gap:6px;margin-top:1px}
+.dfl-open{appearance:none;border:1px solid var(--dsw-alias-border-l2-darkmode-thin,rgba(127,127,127,.26));background:transparent;color:var(--dsw-alias-label-secondary,inherit);border-radius:5px;padding:0 5px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer;align-self:flex-start}
+.dfl-open:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,inherit)}
+.dfl-open[disabled]{opacity:.45;cursor:default}
+.dfl-coverage{margin:0;color:var(--dsw-alias-label-tertiary,inherit);font-size:11px;line-height:1.5}
 .dfl-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:8px;min-height:100%;max-width:430px;margin:0 auto;padding:28px 20px;box-sizing:border-box}
 .dfl-empty-glyph{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));font-size:20px}
 .dfl-empty h3{margin:2px 0 0;font-size:14px;font-weight:600}
@@ -634,6 +808,7 @@ window.__ModuleLoader__.load({
   .dfl-grid{grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px;padding:8px}
   .dfl-head{padding:8px 8px 4px}
   .dfl-source{display:none}
+  .dfl-scope-count{display:none}
   .dfl-foot{display:none}
 }
 @media (max-width:768px){
@@ -698,6 +873,14 @@ window.__ModuleLoader__.load({
       formatBytes,
       relativeTime,
       insertReference,
+      indexQuery,
+      coverageText,
+      objectUrl,
+      readScopePreference,
+      saveScopePreference,
+      scopeFallbackText,
+      SCOPES,
+      SCOPE_STORAGE_KEY,
       KIND,
       ID,
       CSS,
