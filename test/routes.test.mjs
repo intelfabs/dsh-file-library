@@ -98,6 +98,10 @@ test('index, thumbnail, file and filed routes work over a real same-origin HTTP 
     assert.equal(filedBody.count, 1)
     assert.equal(filedBody.files[0].tags[0], 'launch')
 
+    const byTag = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=12345678-1234-4123-8123-123456789abc&q=launch`)).json()
+    assert.equal(byTag.count, 1)
+    assert.equal(byTag.entries[0].sha256, ctx.png.sha)
+
     const after = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=12345678-1234-4123-8123-123456789abc`)).json()
     const row = after.entries.find(entry => entry.sha256 === ctx.png.sha)
     assert.equal(row.filed, true)

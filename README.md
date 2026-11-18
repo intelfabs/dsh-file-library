@@ -122,7 +122,7 @@ The plugin is written to be safe on a host that is reachable through a browser, 
 
 - **User-sent files only.** Tool-generated images (for example PDF page renders) are deliberately not indexed; the library is about files *you* sent.
 - **Metadata can be stale.** A warm start serves the cache while the background rebuild runs. The refresh button re-reads the host; a file sent seconds ago may need one refresh.
-- **Bounded scan.** Defaults: 5,000 session logs, 32 MiB per log, 20,000 frames per log, 50,000 objects, scan depth 4. A log over the byte cap is skipped and counted in status/warnings rather than partially indexed.
+- **Bounded scan.** Defaults: 5,000 session logs, 32 MiB per log, 20,000 frames per log, 50,000 objects, scan depth 4. A log over the byte cap is skipped and counted in status/warnings rather than partially indexed. A cold build is proportional to log volume: on the development machine's 730 logs / 148k frames it took about 9 seconds; the warm start from cache took about 4 ms.
 - **No PDF page thumbnails.** Rendering PDFs would need a native or heavy JS engine; PDFs and documents get generated type cards instead. Images use their original bytes, scaled by the browser.
 - **One row per SHA.** The same object sent in two sessions is one row with an occurrence count; the displayed source is the message whose name is shown. Names in the logs are whatever the sender stored; the plugin prefers a specific name over a generic `image.png`.
 - **No full-text search.** Search covers metadata (name, type, extension, session title, tags), not document contents.
