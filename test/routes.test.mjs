@@ -83,7 +83,7 @@ test('index, thumbnail, file and filed routes work over a real same-origin HTTP 
     const fileResponse = await post(ctx.server, '/plugins/dsh-file-library/file', {
       sha: ctx.png.sha,
       sessionId: '12345678-1234-4123-8123-123456789abc',
-      tags: ['launch'],
+      tags: ['zebra'],
     })
     assert.equal(fileResponse.status, 200)
     const filed = await fileResponse.json()
@@ -96,9 +96,9 @@ test('index, thumbnail, file and filed routes work over a real same-origin HTTP 
     const filedResponse = await get(ctx.server, `/plugins/dsh-file-library/filed?sessionId=12345678-1234-4123-8123-123456789abc`)
     const filedBody = await filedResponse.json()
     assert.equal(filedBody.count, 1)
-    assert.equal(filedBody.files[0].tags[0], 'launch')
+    assert.equal(filedBody.files[0].tags[0], 'zebra')
 
-    const byTag = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=12345678-1234-4123-8123-123456789abc&q=launch`)).json()
+    const byTag = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=12345678-1234-4123-8123-123456789abc&q=zebra`)).json()
     assert.equal(byTag.count, 1)
     assert.equal(byTag.entries[0].sha256, ctx.png.sha)
 
