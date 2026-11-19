@@ -4,3 +4,10 @@ node_modules/
 coverage/
 .DS_Store
 Thumbs.db
+
+# Local artifacts that must never be published:
+# filed copies of test uploads (screenshots, charts) and pack output.
+library/
+dist/
+# Working plans, e.g. PLAN-zero-copy-reuse.md.
+PLAN-*.md
