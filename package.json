@@ -1,6 +1,6 @@
 {
   "name": "dsh-file-library",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "private": false,
   "description": "A searchable library of every file ever sent to DeepSeek Harness, with one-click filing into the session workspace and reuse in any chat.",
   "license": "MIT",

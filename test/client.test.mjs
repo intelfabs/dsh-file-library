@@ -85,16 +85,18 @@ test('list view and multi-select toolbar render, and search filters deterministi
   assert.match(noResults, /No files match that search/)
 })
 
-test('the reference is exactly the @library/<name> grammar and reads back from the workspace', async () => {
+test('a name with a space is quoted so the reference token does not stop early', async () => {
   const api = await loadClient()
   const reference = api.__internals.buildReference({ name: 'Q3 review.pdf' })
-  assert.equal(reference, '@library/Q3 review.pdf')
-  assert.match(reference, /^@library\/[^/]+$/)
+  assert.equal(reference, '@"library/Q3 review.pdf"')
+  assert.match(reference, /^@"library\/[^/]+"$/)
+  assert.equal(api.__internals.buildReference({ name: 'pixel.png' }), '@library/pixel.png')
+  assert.equal(api.__internals.buildReference({ name: 'report.' }), '@"library/report."')
 
   const home = await makeHome()
   try {
     await mkdir(join(home, 'workspace', 'library'), { recursive: true })
-    const relative = reference.slice(1)
+    const relative = reference.slice(2, -1)
     await writeFile(join(home, 'workspace', relative), 'readable')
     const { readFile } = await import('node:fs/promises')
     assert.equal(await readFile(join(home, 'workspace', relative), 'utf8'), 'readable')
@@ -214,30 +216,82 @@ test('a scope fallback is surfaced instead of silently listing every file', asyn
   assert.equal(api.__internals.scopeFallbackText('http-404'), 'Showing all files instead — the host did not return a scoped list.')
 })
 
-test('the scope is sent as a name and the choice is remembered', async () => {
+test('the scope is sent as a name and remembered per chat', async () => {
   const api = await loadClient()
   assert.equal(api.__internals.SCOPE_STORAGE_KEY, 'dsh-file-library:scope')
+  assert.equal(api.__internals.scopeStorageKey('session-1'), 'dsh-file-library:scope:session-1')
   assert.equal(api.__internals.indexQuery('session-1', 'workspace'), 'index?sessionId=session-1&scope=workspace&limit=2000')
   assert.equal(api.__internals.indexQuery('a b', 'all'), 'index?sessionId=a%20b&scope=all&limit=2000')
   assert.equal(api.__internals.indexQuery('session-1', null), 'index?sessionId=session-1&scope=workspace&limit=2000')
 
-  assert.equal(api.__internals.readScopePreference(), 'workspace')
+  assert.equal(api.__internals.readScopePreference('session-1'), 'workspace')
+  const map = new Map()
   const store = {
-    value: null,
-    getItem() { return this.value },
-    setItem(_key, next) { this.value = next },
+    getItem(key) { return map.get(key) ?? null },
+    setItem(key, value) { map.set(key, value) },
+    removeItem(key) { map.delete(key) },
   }
-  assert.equal(api.__internals.saveScopePreference('all', store), 'all')
-  assert.equal(api.__internals.readScopePreference(store), 'all')
-  assert.equal(api.__internals.saveScopePreference('workspace', store), 'workspace')
-  assert.equal(api.__internals.readScopePreference(store), 'workspace')
+  assert.equal(api.__internals.saveScopePreference('session-1', 'all', store), 'all')
+  assert.equal(api.__internals.readScopePreference('session-1', store), 'all')
+  // A choice in one chat must not widen another chat.
+  assert.equal(api.__internals.readScopePreference('session-2', store), 'workspace')
+  assert.equal(api.__internals.saveScopePreference('session-1', 'workspace', store), 'workspace')
+  assert.equal(api.__internals.readScopePreference('session-1', store), 'workspace')
+
+  // The pre-0.2.3 global key leaked "all" into every chat; it is dropped, not inherited.
+  const legacy = {
+    map: new Map([['dsh-file-library:scope', 'all']]),
+    getItem(key) { return this.map.get(key) ?? null },
+    setItem(key, value) { this.map.set(key, value) },
+    removeItem(key) { this.map.delete(key) },
+  }
+  assert.equal(api.__internals.readScopePreference('session-9', legacy), 'workspace')
+  assert.equal(legacy.map.has('dsh-file-library:scope'), false)
 
   const denied = {
     getItem() { throw new Error('denied') },
     setItem() { throw new Error('denied') },
+    removeItem() { throw new Error('denied') },
   }
-  assert.equal(api.__internals.readScopePreference(denied), 'workspace')
-  assert.equal(api.__internals.saveScopePreference('all', denied), 'all')
+  assert.equal(api.__internals.readScopePreference('session-1', denied), 'workspace')
+  assert.equal(api.__internals.saveScopePreference('session-1', 'all', denied), 'all')
+})
+
+ test('the import form takes an absolute path and marks an imported row', async () => {
+  const api = await loadClient()
+  const model = api.__internals.buildModel({
+    entries: [entry({ imported: true })], importOpen: true, importPath: 'C:\\Users\\me\\a.pdf', width: 900, now: NOW,
+  })
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /data-dfl-import-form="1"/)
+  assert.match(html, /data-dfl-import-path="1"/)
+  assert.match(html, /C:\\Users\\me\\a\.pdf/)
+  assert.match(html, /data-dfl-imported="1"/)
+  const closed = api.__internals.buildModel({ entries: [], width: 900, now: NOW })
+  assert.doesNotMatch(serialize(api.__internals.buildView(closed)), /data-dfl-import-form/)
+})
+
+test('the all-files view labels rows from other workspaces', async () => {
+  const api = await loadClient()
+  const own = entry({ sha256: 'b'.repeat(64), state: 'in-workspace', inWorkspace: true })
+  const foreign = entry({ sha256: 'c'.repeat(64), state: 'global', inWorkspace: false })
+  const model = api.__internals.buildModel({
+    entries: [own, foreign], scope: 'all', totalAll: 9, width: 900, now: NOW,
+  })
+  assert.equal(model.foreignCount, 1)
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /1 from other workspaces/)
+  assert.match(html, /data-dfl-foreign="1"/)
+  assert.match(html, /Other workspace/)
+})
+
+ test('a type chip with no rows explains that only sent files are indexed', async () => {
+  const api = await loadClient()
+  const model = api.__internals.buildModel({ entries: [], totalAll: 4, kind: 'pdf', width: 800, now: NOW })
+  const html = serialize(api.__internals.buildView(model))
+  assert.match(html, /data-dfl-empty-state="kind-empty"/)
+  assert.match(html, /No PDF files in this view/)
+  assert.match(html, /not stored as an attachment/)
 })
 test('the Open action points at /object/<sha> and never files anything', async () => {
   const api = await loadClient()

@@ -6,7 +6,7 @@ import { createLibrary, publicCoverage, resolveState } from '../lib/library.js'
 import { readSessionLog } from '../lib/indexer.js'
 import { decodeZstdLog } from '../lib/zstd-log.js'
 import { addWorkspace, workspaceKey } from '../lib/util.js'
-import { cleanup, makeHome, writeObject, writeSession } from './helpers.mjs'
+import { cleanup, makeHome, writeFileObject, writeObject, writeSession } from './helpers.mjs'
 
 async function fixture() {
   const home = await makeHome()
@@ -69,7 +69,7 @@ test('cold index builds and caches; warm start reuses the cache without decoding
     const cacheStat = await stat(cacheFile)
     assert.ok(cacheStat.size > 0)
     const cache = JSON.parse(await readFile(cacheFile, 'utf8'))
-    assert.equal(cache.version, 3)
+    assert.equal(cache.version, 4)
     assert.equal(cache.entries.find(row => row.sha256 === report.sha).workspaces.length, 1)
     assert.equal(Object.keys(cache.sessions).length, 1)
 
@@ -106,6 +106,56 @@ test('the same digest sent twice is one row with two occurrences, and a specific
     assert.equal(rows[0].occurrences, 2)
     assert.equal(rows[0].name, 'revenue chart.png')
     assert.equal(rows[0].sessionTitle, 'Chart chat')
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('a PDF in the generic-file store is indexed with a media type derived from its name', async () => {
+  const home = await makeHome()
+  try {
+    const pdf = await writeFileObject(home, Buffer.from('%PDF-1.7 stored as a generic file'), 'Q2 board pack.pdf')
+    await writeSession(home, {
+      sessionId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      cwd: join(home, 'workspace'),
+      title: 'Board pack',
+      messages: [{ name: 'Q2 board pack.pdf', mime: 'application/pdf', bytes: pdf.bytes, sha: pdf.sha }],
+    })
+    const library = createLibrary({ home, cacheDir: join(home, 'cache') })
+    const status = await library.init({ background: false })
+    assert.equal(status.count, 1)
+    assert.equal(status.stats.fileObjects, 1)
+    assert.equal(status.stats.missingObjects, 0)
+
+    const row = library.get(pdf.sha)
+    assert.equal(row.name, 'Q2 board pack.pdf')
+    assert.equal(row.kind, 'pdf')
+    assert.equal(row.mediaType, 'application/pdf')
+    assert.equal(row.objectPath, pdf.path)
+    assert.equal(row.store, 'file')
+    assert.equal(row.available, true)
+    assert.equal(library.query({ kind: 'pdf' }).entries.length, 1)
+  } finally {
+    await cleanup(home)
+  }
+})
+
+test('a generic file whose log lost the name recovers it from the named reference link', async () => {
+  const home = await makeHome()
+  try {
+    const pdf = await writeFileObject(home, Buffer.from('%PDF-1.7 unnamed in the log'), 'Recovered name.pdf')
+    await writeSession(home, {
+      sessionId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      cwd: join(home, 'workspace'),
+      title: 'Unnamed file',
+      messages: [{ name: '', mime: 'application/pdf', bytes: pdf.bytes, sha: pdf.sha }],
+    })
+    const library = createLibrary({ home, cacheDir: join(home, 'cache') })
+    await library.init({ background: false })
+    const row = library.get(pdf.sha)
+    assert.equal(row.name, 'Recovered name.pdf')
+    assert.equal(row.kind, 'pdf')
+    assert.equal(row.mediaType, 'application/pdf')
   } finally {
     await cleanup(home)
   }

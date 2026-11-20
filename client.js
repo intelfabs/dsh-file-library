@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
     // One tab browses its own workspace by default; the whole-library view is
     // an explicit second choice, remembered per browser for the next open.
     const SCOPES = ['workspace', 'all']
+    /** Legacy global key; only read to delete it (see readScopePreference). */
     const SCOPE_STORAGE_KEY = 'dsh-file-library:scope'
     const SCOPE_FALLBACK_REASON = {
       'no-session': 'no session is attached to this tab',
@@ -38,24 +39,39 @@ window.__ModuleLoader__.load({
       return typeof localStorage === 'undefined' ? undefined : localStorage
     }
 
-    /** The remembered scope for the library tab; defaults to this workspace. */
-    function readScopePreference(storage) {
+    /** One scope per chat, so a choice made elsewhere cannot widen this one. */
+    function scopeStorageKey(sessionId) {
+      const id = typeof sessionId === 'string' && sessionId !== '' ? sessionId : 'default'
+      return `${SCOPE_STORAGE_KEY}:${id}`
+    }
+
+    /**
+     * The remembered scope for this chat; defaults to this workspace.
+     *
+     * Before 0.2.3 one global key held the choice, so clicking "All files" once
+     * made every later chat show other workspaces' files. That key is dropped
+     * instead of inherited, which returns every chat to its own workspace.
+     */
+    function readScopePreference(sessionId, storage) {
       const store = scopeStore(storage)
       if (store === undefined) return 'workspace'
       try {
-        return store.getItem(SCOPE_STORAGE_KEY) === 'all' ? 'all' : 'workspace'
+        const value = store.getItem(scopeStorageKey(sessionId))
+        if (value === 'all' || value === 'workspace') return value
+        store.removeItem(SCOPE_STORAGE_KEY)
+        return 'workspace'
       } catch {
         return 'workspace'
       }
     }
 
-    /** Persist the scope choice; denied storage (private mode) is not fatal. */
-    function saveScopePreference(scope, storage) {
+    /** Persist this chat's scope choice; denied storage (private mode) is not fatal. */
+    function saveScopePreference(sessionId, scope, storage) {
       const wanted = scope === 'all' ? 'all' : 'workspace'
       const store = scopeStore(storage)
       if (store === undefined) return wanted
       try {
-        store.setItem(SCOPE_STORAGE_KEY, wanted)
+        store.setItem(scopeStorageKey(sessionId), wanted)
       } catch {
         // The in-memory scope still applies for this page.
       }
@@ -122,7 +138,11 @@ window.__ModuleLoader__.load({
         body: JSON.stringify(payload),
       })
       const body = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(body?.error ?? `HTTP ${response.status}`)
+      if (!response.ok) {
+        const error = new Error(body?.error ?? `HTTP ${response.status}`)
+        error.status = response.status
+        throw error
+      }
       return body
     }
 
@@ -231,6 +251,12 @@ window.__ModuleLoader__.load({
         scope: input.scope === 'all' ? 'all' : 'workspace',
         scopeFallback: typeof input.scopeFallback === 'string' && input.scopeFallback !== '' ? input.scopeFallback : null,
         coverage: input.coverage ?? null,
+        importOpen: input.importOpen === true,
+        importPath: typeof input.importPath === 'string' ? input.importPath : '',
+        importing: input.importing === true,
+        foreignCount: Number.isFinite(Number(input.foreignCount))
+          ? Math.max(0, Math.trunc(Number(input.foreignCount)))
+          : entries.filter(entry => entry.state === 'global').length,
         totalAll: Number.isFinite(Number(input.totalAll)) ? Math.max(0, Math.trunc(Number(input.totalAll))) : entries.length,
         now: Number(input.now) || Date.now(),
         handlers: input.handlers ?? {},
@@ -305,6 +331,12 @@ window.__ModuleLoader__.load({
           entry.state === 'missing'
             ? h('span', { className: 'dfl-missing', 'data-dfl-missing': '1' }, 'Missing · bytes are gone')
             : null,
+          entry.state === 'global'
+            ? h('span', { className: 'dfl-foreign', 'data-dfl-foreign': '1' }, 'Other workspace')
+            : null,
+          entry.imported
+            ? h('span', { className: 'dfl-imported', 'data-dfl-imported': '1' }, 'Imported')
+            : null,
           entry.filed ? h('span', { className: 'dfl-filed' }, `Filed · library/${entry.name}`) : null,
           h('span', { className: 'dfl-actions' },
             h('button', {
@@ -324,6 +356,21 @@ window.__ModuleLoader__.load({
 
     function emptyState(model) {
       const searching = model.query.trim() !== '' || model.kind !== 'all'
+      if (model.kind !== 'all' && model.query.trim() === '' && model.entries.length === 0) {
+        const label = KIND_LABEL[model.kind] ?? 'Files'
+        const offerAll = model.scope === 'workspace' && model.totalAll > 0
+        return h('div', { className: 'dfl-empty', 'data-dfl-empty-state': 'kind-empty' },
+          h('div', { className: 'dfl-empty-glyph', 'aria-hidden': 'true' }, '▤'),
+          h('h3', null, `No ${label} files in this view`),
+          h('p', null,
+            'Files appear here only after you send them in a chat. A file you open from a path is not stored as an attachment, so it never becomes a library row.'),
+          offerAll
+            ? h('button', {
+              type: 'button', className: 'dfl-btn is-primary', 'data-dfl-switch-scope': 'all',
+              onClick: () => model.handlers.onScope?.('all'),
+            }, 'Search all files')
+            : null)
+      }
       if (searching) {
         return h('div', { className: 'dfl-empty', 'data-dfl-empty-state': 'no-results' },
           h('div', { className: 'dfl-empty-glyph', 'aria-hidden': 'true' }, '⌕'),
@@ -383,6 +430,10 @@ window.__ModuleLoader__.load({
               'aria-pressed': model.view === 'list', onClick: () => handlers.onView?.('list'),
             }, '☰'),
             h('button', {
+              type: 'button', className: 'dfl-icon-btn', title: 'Import a file from this computer', 'aria-label': 'Import a file',
+              'data-dfl-import-toggle': '1', onClick: () => handlers.onToggleImport?.(),
+            }, '⤓'),
+            h('button', {
               type: 'button', className: 'dfl-icon-btn', title: 'Refresh index', 'aria-label': 'Refresh index',
               onClick: () => handlers.onRefresh?.(),
             }, '↻')),
@@ -398,11 +449,34 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dfl-scope-count', 'data-dfl-total-all': String(model.totalAll) },
               model.scope === 'workspace'
                 ? `${model.allEntries.length} of ${model.totalAll} file${model.totalAll === 1 ? '' : 's'}`
-                : `${model.allEntries.length} file${model.allEntries.length === 1 ? '' : 's'}`)),
+                : `${model.allEntries.length} file${model.allEntries.length === 1 ? '' : 's'}${model.foreignCount > 0 ? ` · ${model.foreignCount} from other workspaces` : ''}`)),
           model.scopeFallback === null
             ? null
             : h('p', { className: 'dfl-scope-fallback', 'data-dfl-scope-fallback': model.scopeFallback, role: 'status' },
               scopeFallbackText(model.scopeFallback)),
+          model.importOpen
+            ? h('form', {
+              className: 'dfl-import', 'data-dfl-import-form': '1',
+              onSubmit: event => { event.preventDefault(); model.handlers.onImportSubmit?.() },
+            },
+              h('input', {
+                type: 'text',
+                className: 'dfl-import-input',
+                'data-dfl-import-path': '1',
+                placeholder: 'C:\\path\\to\\file.pdf',
+                value: model.importPath,
+                onChange: event => model.handlers.onImportPath?.(event.target.value),
+                'aria-label': 'Absolute path to a file on this computer',
+              }),
+              h('button', {
+                type: 'submit', className: 'dfl-btn is-primary',
+                disabled: model.importing || model.importPath.trim() === '',
+              }, model.importing ? 'Importing…' : 'Import'),
+              h('button', {
+                type: 'button', className: 'dfl-btn is-quiet',
+                onClick: () => model.handlers.onImportCancel?.(),
+              }, 'Cancel'))
+            : null,
           model.coverage?.truncated === true
             ? h('p', { className: 'dfl-coverage', 'data-dfl-coverage': 'truncated', role: 'status' },
               coverageText(model.coverage))
@@ -478,7 +552,10 @@ window.__ModuleLoader__.load({
     }
 
     function buildReference(entry) {
-      return `@library/${entry.name}`
+      const name = typeof entry?.name === 'string' && entry.name.trim() !== '' ? entry.name.trim() : 'file'
+      const path = `library/${name.replaceAll('"', '_')}`
+      const needsQuotes = /[\s"]/u.test(name) || /[.,;:!?，。；：！？]$/u.test(name)
+      return needsQuotes ? `@"${path}"` : `@${path}`
     }
 
     /* --------------------------------------------------------------- body -- */
@@ -489,7 +566,8 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState({
         loading: true, error: null, entries: [], query: '', kind: 'all', view: 'grid',
         selected: [], active: 0, toast: null, filedCount: 0,
-        scope: readScopePreference(), scopeFallback: null, totalAll: 0, coverage: null,
+        scope: readScopePreference(sessionId), scopeFallback: null, totalAll: 0, coverage: null, foreignCount: 0,
+        importOpen: false, importPath: '', importing: false,
       })
       const [width, setWidth] = useState(() => {
         if (typeof window !== 'undefined' && Number.isFinite(window.innerWidth)) return Math.min(1200, window.innerWidth)
@@ -543,6 +621,20 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
+      // Refresh re-scans the host logs first; a plain list read can serve a scan
+      // that predates the file the user just sent.
+      const refresh = useCallback(async () => {
+        try {
+          await postJson('reindex', {})
+        } catch (error) {
+          // An older host half has no /reindex; the list read still works.
+          if (error?.status !== 404) {
+            setState(current => notify(current, `Could not refresh the index: ${error instanceof Error ? error.message : String(error)}`))
+          }
+        }
+        await load(state.scope)
+      }, [load, state.scope])
+
       useEffect(() => { void load(state.scope) }, [load, state.scope])
 
       useEffect(() => {
@@ -572,6 +664,31 @@ window.__ModuleLoader__.load({
       }, [info.tab.visible])
 
       const update = useCallback(patch => setState(current => ({ ...current, ...patch })), [])
+
+      // Import copies one existing file into the attachment store host-side; it
+      // does not depend on the composer's file picker.
+      const importFromPath = useCallback(async () => {
+        const path = state.importPath.trim()
+        if (path === '') return
+        setState(current => ({ ...current, importing: true, error: null }))
+        try {
+          const result = await postJson('import', { sessionId, path })
+          setState(current => ({
+            ...current,
+            importing: false,
+            importOpen: false,
+            importPath: '',
+            toast: `Imported ${result.name}`,
+          }))
+          await load(state.scope)
+        } catch (error) {
+          setState(current => ({
+            ...current,
+            importing: false,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        }
+      }, [sessionId, state.importPath, state.scope, load])
 
       const fileEntry = useCallback(async entry => {
         try {
@@ -648,9 +765,13 @@ window.__ModuleLoader__.load({
           onSearch: value => update({ query: value, active: 0 }),
           onKind: kind => update({ kind, active: 0 }),
           onView: view => update({ view }),
-          onRefresh: () => { void load(state.scope) },
+          onRefresh: () => { void refresh() },
+          onToggleImport: () => update({ importOpen: !state.importOpen, importPath: '', error: null }),
+          onImportPath: value => update({ importPath: value }),
+          onImportCancel: () => update({ importOpen: false, importPath: '', importing: false }),
+          onImportSubmit: () => { void importFromPath() },
           onScope: scope => {
-            saveScopePreference(scope)
+            saveScopePreference(sessionId, scope)
             update({ scope: scope === 'all' ? 'all' : 'workspace', selected: [], active: 0 })
           },
           onClearSearch: () => update({ query: '', kind: 'all', active: 0 }),
@@ -787,6 +908,11 @@ window.__ModuleLoader__.load({
 .dfl-source{color:var(--dsw-alias-label-tertiary,inherit);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dfl-filed{color:var(--dsw-alias-state-success-primary,#2e8b57);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dfl-missing{color:var(--dsw-alias-state-error-primary,#c0392b);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dfl-foreign{color:var(--dsw-alias-label-tertiary,inherit);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dfl-imported{color:var(--dsw-alias-label-secondary,inherit);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dfl-import{display:flex;align-items:center;gap:6px;min-width:0}
+.dfl-import-input{flex:1 1 auto;min-width:0;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2-darkmode-thin,rgba(127,127,127,.28));background:var(--dsw-specific-input-major,var(--dsw-alias-surface-2,rgba(127,127,127,.06)));color:inherit;border-radius:7px;padding:5px 8px;font:inherit;font-size:12px;outline:none}
+.dfl-import-input:focus{border-color:var(--dsw-alias-border-accent,rgba(99,132,255,.75))}
 .dfl-actions{display:flex;gap:6px;margin-top:1px}
 .dfl-open{appearance:none;border:1px solid var(--dsw-alias-border-l2-darkmode-thin,rgba(127,127,127,.26));background:transparent;color:var(--dsw-alias-label-secondary,inherit);border-radius:5px;padding:0 5px;font:inherit;font-size:10.5px;line-height:16px;cursor:pointer;align-self:flex-start}
 .dfl-open:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,inherit)}
@@ -878,6 +1004,7 @@ window.__ModuleLoader__.load({
       objectUrl,
       readScopePreference,
       saveScopePreference,
+      scopeStorageKey,
       scopeFallbackText,
       SCOPES,
       SCOPE_STORAGE_KEY,

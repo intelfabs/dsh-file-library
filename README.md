@@ -6,16 +6,17 @@ A visible, searchable library of every file you have ever sent to DeepSeek Harne
 
 DSH keeps attachment bytes in a content-addressed store, but the original filename survives only inside old session logs. This plugin is the missing bridge: it reads those logs on the host, joins them to the attachment objects, and adds a **File library** tab to the right sidebar. You can see the PDF you sent three months ago, search it by name, file it into the current workspace, and drop `@library/<name>` into the composer.
 
-Version **0.2.1** · MIT · built and tested against **DeepSeek Harness 0.2.2-rc.3**.
+Version **0.2.5** · MIT · built and tested against **DeepSeek Harness 0.2.2-rc.3**.
 
 ## What it does
 
-- **Indexes, not re-uploads.** Reads `$DSH_HOME/attachments/v1/objects/<sha[0:2]>/<sha>` and the multi-frame Zstandard session logs under `$DSH_HOME/sessions/`. The original name, media type, size, sending time and source session title come from the logs; the bytes never move.
+- **Indexes, not re-uploads.** Reads both of DSH's content-addressed stores — `$DSH_HOME/attachments/v1/objects/<sha[0:2]>/<sha>` for normalized images and `$DSH_HOME/attachments/v1/file-objects/<sha[0:2]>/<sha>` for every other uploaded file (PDFs, Office documents, archives) — and the multi-frame Zstandard session logs under `$DSH_HOME/sessions/`. Generic files log a name and a byte count but no media type, so the type is derived from the name and a missing name is recovered from the store's named reference link. The original media type, size, sending time and source session title come from the logs; the bytes never move.
 - **A real tab.** A new right-sidebar kind `library` with a thumbnail grid/list toggle, type chips (PDF / images / docs / sheets / archives), search over name, type, session and tag, recency sort, and multi-select. It does not reuse or replace the built-in `files` kind.
-- **Scoped to the chat you are in.** By default the tab lists only files that belong to the current session's workspace: the ones sent from this chat, plus anything already filed into its `library/`. A **This workspace / All files** switch opens the host-wide view, and the tab remembers your choice. The host resolves the workspace from its own session header; the browser never names a path.
+- **Scoped to the chat you are in.** By default the tab lists only files that belong to the current session's workspace: the ones sent from this chat, plus anything already filed into its `library/`. A **This workspace / All files** switch opens the host-wide view; that choice is remembered for **that chat only**, so a wider view never carries into another chat. In the all-files view a row from another workspace is labelled **Other workspace**. The host resolves the workspace from its own session header; the browser never names a path.
 - **Open/Preview without copying.** Every row streams its original bytes from `/object/<sha>` in a new tab — PDFs, images and plain text inline, everything else as a download. No file is created in the workspace, and the object store is read directly.
 - **File this (only when you need to edit).** Copies one object to `<session workspace>/library/<name>.<ext>`, updates `library/.manifest.json`, and regenerates a plain-text `library/INDEX.md`. Filing is keyed by SHA-256, so doing it twice is a no-op.
-- **Use in chat.** Inserts the `@library/<name>` reference into the current session's composer using DSH's existing `@path` insertion service. The agent reads the file by path.
+- **Import from this computer.** When the composer's file picker is unavailable, the **⤓** button in the tab takes an absolute path, copies the file byte-for-byte into DSH's attachment store, and lists it like any other file. This is an explicit import; an `@path` reference in a message is still not an upload.
+- **Use in chat.** Inserts the `@library/<name>` reference into the current session's composer using DSH's existing `@path` insertion service. The agent reads the file by path. A name with a space is inserted as one quoted token — `@"library/Scaling the Supply Peak.pdf"` — because DSH's unquoted `@path` scan stops at the first space.
 - **Agent tools.** `library_list`, `library_read` and `library_use`: an agent can find a file, read a text file with no copy, and file a copy only when it must edit.
 - **Portable by construction.** Every route lives on the host's existing web server. No second listener, no port, no desktop helper, no native module, no UI framework dependency.
 
@@ -54,7 +55,7 @@ dsh plugin --profile <name> add <path-or-tgz>
 Examples:
 
 ```sh
-dsh plugin --profile desktop add ./dsh-file-library-0.2.1.tgz
+dsh plugin --profile desktop add ./dsh-file-library-0.2.5.tgz
 dsh plugin --profile web add /opt/plugins/dsh-file-library
 ```
 
@@ -62,14 +63,14 @@ After installation, reload the page. If the plugin manager reports `restart-requ
 
 ### First run
 
-The first page load can take a few seconds while the host scans session logs; the tab shows an indexing state. The index is then cached under `$DSH_HOME/cache/dsh-file-library/`, and later starts load that cache immediately and rebuild in the background.
+The first page load can take a few seconds while the host scans session logs; the tab shows an indexing state. The index is then cached under `$DSH_HOME/cache/dsh-file-library/`, and later starts load that cache immediately and rebuild in the background. A listing re-scans when the last scan is older than 30 seconds, and the ↻ button forces a re-scan, so a file sent after DSH started appears without restarting the host.
 
 ## Using it
 
 | Action | How |
 | --- | --- |
 | Search | Type in the search field, or press `/` while the tab is visible. |
-| Choose the scope | **This workspace** (default) lists the files of the current session's workspace; **All files** lists every file sent to DSH on this host. The choice is remembered per browser. |
+| Choose the scope | **This workspace** (default) lists the files of the current session's workspace; **All files** lists every file sent to DSH on this host. The choice is remembered per chat, and rows outside the current workspace are labelled **Other workspace**. |
 | Filter by type | Click a chip. Counts are over the files in the current scope, not the current search. |
 | Select | Click a row, or use the checkbox. `Space` toggles the focused row. |
 | Move | Arrow keys move the focused row; `Down`/`Up` move by a row of the current grid. |
@@ -77,7 +78,8 @@ The first page load can take a few seconds while the host scans session logs; th
 | Use | `Enter`, double-click, or **Use in chat**. Files first if needed, then inserts `@library/<name>`. |
 | File only | **File this** on the selection, or the same button on a row's selection. |
 | Clear | `Esc` clears the search and selection. |
-| Refresh | The ↻ button re-reads the host index. |
+| Refresh | The ↻ button re-scans the host session logs, then reloads the list. Use it after sending a file. |
+| Import | Click **⤓** in the header, type the file's absolute path, and press **Import**. The file is copied into the attachment store and listed. Use this when the composer's file picker is unavailable. |
 
 The footer of every row reads like `sent 3 months ago · Quarterly reports`, so recognition does not depend on remembering a filename.
 
@@ -140,7 +142,7 @@ The plugin is written to be safe on a host that is reachable through a browser, 
 - **No full-text search.** Search covers metadata (name, type, extension, session title, tags), not document contents.
 - **Tags are local.** Tags live in each workspace's `library/.manifest.json`; they are not a global database.
 - **No per-user isolation beyond DSH's.** Anyone who can reach the DSH host and pass its own access controls sees the same attachment store the agent sees.
-- **Not a file tree, editor, git panel or upload replacement.** Those are separate plugins; v0.2.1 stays inside the scope above.
+- **Not a file tree, editor, git panel or upload replacement.** Those are separate plugins; v0.2.5 stays inside the scope above. A PDF that was only *referenced by path* (for example `@C:\reports\Q3.pdf`) was never uploaded, so it is not in the attachment store and cannot appear here — attach the file in a chat, or use **⤓ Import** with its absolute path, to add it.
 - **Server-rendered layouts are tested offline.** The responsive panel is exercised at 768 px and in fullscreen by deterministic view tests and a real HTTP route suite; a live browser rendering check is listed in the development notes as manual verification.
 
 ## Compatibility

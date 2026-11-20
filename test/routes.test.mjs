@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import test from 'node:test'
 import { createFiler } from '../lib/filing.js'
@@ -9,7 +9,7 @@ import { createWorkspaceResolver } from '../lib/sessions.js'
 import { createToolDefinitions } from '../lib/tools.js'
 import { DEFAULT_LIMITS } from '../lib/indexer.js'
 import { sha256Bytes } from '../lib/util.js'
-import { cleanup, makeHome, startRouteServer, writeObject, writeSession } from './helpers.mjs'
+import { cleanup, makeHome, startRouteServer, writeFileObject, writeObject, writeSession } from './helpers.mjs'
 
 const ONE_PIXEL_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -114,6 +114,54 @@ test('index, thumbnail, file and filed routes work over a real same-origin HTTP 
   } finally {
     await ctx.server.close()
     await cleanup(ctx.home)
+  }
+})
+
+test('a PDF in the generic-file store is listed, served inline and can be filed', async () => {
+  const home = await makeHome()
+  const workspace = join(home, 'workspace-generic')
+  await mkdir(workspace, { recursive: true })
+  const sessionId = '33333333-3333-4333-8333-333333333333'
+  const pdf = await writeFileObject(home, Buffer.from('%PDF-1.7 generic store fixture'), 'deck.pdf')
+  await writeSession(home, {
+    sessionId,
+    cwd: workspace,
+    title: 'Deck review',
+    messages: [{ name: 'deck.pdf', mime: 'application/pdf', bytes: pdf.bytes, sha: pdf.sha }],
+  })
+  const library = createLibrary({ home, cacheDir: join(home, 'cache') })
+  await library.init({ background: false })
+  const filer = createFiler({ home, limits: DEFAULT_LIMITS })
+  const resolveWorkspace = createWorkspaceResolver({ home, library })
+  const routes = createRoutes({ library, filer, resolveWorkspace, cacheDir: join(home, 'cache'), limits: DEFAULT_LIMITS })
+  const server = await startRouteServer(routes.handle)
+  try {
+    const listed = await (await get(server, `/plugins/dsh-file-library/index?sessionId=${sessionId}`)).json()
+    assert.equal(listed.count, 1)
+    assert.equal(listed.entries[0].kind, 'pdf')
+    assert.equal(listed.entries[0].mediaType, 'application/pdf')
+    assert.equal(listed.entries[0].name, 'deck.pdf')
+
+    const object = await get(server, `/plugins/dsh-file-library/object/${pdf.sha}`)
+    assert.equal(object.status, 200)
+    assert.equal(object.headers.get('content-type'), 'application/pdf')
+    assert.match(object.headers.get('content-disposition'), /^inline;/)
+    assert.equal(sha256Bytes(Buffer.from(await object.arrayBuffer())), pdf.sha)
+
+    const icon = await get(server, `/plugins/dsh-file-library/thumb/${pdf.sha}`)
+    assert.equal(icon.status, 200)
+    assert.match(icon.headers.get('content-type'), /image\/svg\+xml/)
+
+    const filed = await post(server, '/plugins/dsh-file-library/file', { sha: pdf.sha, sessionId })
+    assert.equal(filed.status, 200)
+    const filedBody = await filed.json()
+    assert.equal(filedBody.reference, '@library/deck.pdf')
+    assert.equal(sha256Bytes(await readFile(join(workspace, 'library', 'deck.pdf'))), pdf.sha)
+    const manifest = JSON.parse(await readFile(join(workspace, 'library', '.manifest.json'), 'utf8'))
+    assert.equal(manifest.files[0].mime, 'application/pdf')
+  } finally {
+    await server.close()
+    await cleanup(home)
   }
 })
 
@@ -544,6 +592,107 @@ test('/object refuses unknown, unindexed, cross-site and non-GET requests', asyn
       method: 'POST', headers: { 'sec-fetch-site': 'same-origin' },
     })
     assert.equal(posted.status, 405)
+  } finally {
+    await ctx.server.close()
+    await cleanup(ctx.home)
+  }
+})
+
+test('/reindex and index?refresh=1 rescan logs written after startup', async () => {
+  const ctx = await setup()
+  try {
+    const sid = '12345678-1234-4123-8123-123456789abc'
+    const first = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=${sid}`)).json()
+    assert.equal(first.count, 2)
+
+    // A file sent after the library built its index must not stay invisible.
+    const late = await writeObject(ctx.home, Buffer.from('%PDF-1.7 late arrival'))
+    await writeSession(ctx.home, {
+      sessionId: 'late-session-a',
+      cwd: ctx.workspace,
+      messages: [{ name: 'late.pdf', mime: 'application/pdf', bytes: late.bytes, sha: late.sha }],
+    })
+    const forced = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=${sid}&refresh=1`)).json()
+    assert.equal(forced.count, 3)
+    assert.ok(forced.entries.some(entry => entry.sha256 === late.sha))
+
+    const later = await writeObject(ctx.home, Buffer.from('%PDF-1.7 later arrival'))
+    await writeSession(ctx.home, {
+      sessionId: 'late-session-b',
+      cwd: ctx.workspace,
+      messages: [{ name: 'later.pdf', mime: 'application/pdf', bytes: later.bytes, sha: later.sha }],
+    })
+    const wrongMethod = await get(ctx.server, '/plugins/dsh-file-library/reindex')
+    assert.equal(wrongMethod.status, 405)
+    const reindexed = await post(ctx.server, '/plugins/dsh-file-library/reindex', {})
+    assert.equal(reindexed.status, 200)
+    const body = await reindexed.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.rebuilt, true)
+    assert.equal(body.count, 4)
+
+    const after = await (await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=${sid}`)).json()
+    assert.equal(after.count, 4)
+    assert.ok(after.entries.some(entry => entry.sha256 === later.sha))
+  } finally {
+    await ctx.server.close()
+    await cleanup(ctx.home)
+  }
+})
+
+test('an imported local PDF is stored, listed in its workspace and served', async () => {
+  const ctx = await setup()
+  try {
+    const sid = '12345678-1234-4123-8123-123456789abc'
+    const source = join(ctx.workspace, 'Scaling the Supply Peak.pdf')
+    const bytes = Buffer.from('%PDF-1.7 imported fixture')
+    await writeFile(source, bytes)
+
+    const response = await post(ctx.server, '/plugins/dsh-file-library/import', { sessionId: sid, path: source })
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.name, 'Scaling the Supply Peak.pdf')
+    assert.equal(body.bytes, bytes.length)
+    assert.equal(body.mediaType, 'application/pdf')
+
+    const objectPath = join(ctx.home, 'attachments', 'v1', 'file-objects', body.sha.slice(0, 2), body.sha)
+    assert.equal(sha256Bytes(await readFile(objectPath)), body.sha)
+
+    const scopedResponse = await get(ctx.server, `/plugins/dsh-file-library/index?sessionId=${sid}`)
+    const scopedText = await scopedResponse.text()
+    assert.equal(scopedResponse.status, 200, scopedText)
+    const scoped = JSON.parse(scopedText)
+    assert.equal(scoped.count, 3, scopedText)
+
+    // Filing a name with spaces must produce one quoted reference token.
+    const filedResponse = await post(ctx.server, '/plugins/dsh-file-library/file', { sha: body.sha, sessionId: sid })
+    assert.equal(filedResponse.status, 200)
+    const filed = await filedResponse.json()
+    assert.equal(filed.reference, '@"library/Scaling the Supply Peak.pdf"')
+    const row = scoped.entries.find(entry => entry.sha256 === body.sha)
+    assert.equal(row.name, 'Scaling the Supply Peak.pdf')
+    assert.equal(row.imported, true)
+    assert.equal(row.state, 'in-workspace')
+
+    const served = await get(ctx.server, `/plugins/dsh-file-library/object/${body.sha}`)
+    assert.equal(served.status, 200)
+    assert.equal(served.headers.get('content-type'), 'application/pdf')
+    assert.equal(sha256Bytes(Buffer.from(await served.arrayBuffer())), body.sha)
+  } finally {
+    await ctx.server.close()
+    await cleanup(ctx.home)
+  }
+})
+
+test('import refuses a relative path and a missing file', async () => {
+  const ctx = await setup()
+  try {
+    const sid = '12345678-1234-4123-8123-123456789abc'
+    const relative = await post(ctx.server, '/plugins/dsh-file-library/import', { sessionId: sid, path: 'Scaling.pdf' })
+    assert.equal(relative.status, 400)
+    const missing = await post(ctx.server, '/plugins/dsh-file-library/import', { sessionId: sid, path: join(ctx.workspace, 'nope.pdf') })
+    assert.equal(missing.status, 404)
   } finally {
     await ctx.server.close()
     await cleanup(ctx.home)

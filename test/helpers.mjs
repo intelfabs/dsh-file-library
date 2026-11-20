@@ -3,7 +3,7 @@
  * session logs and content-addressed attachment objects. Every test builds its
  * own directory under the OS temp root and removes it afterwards.
  */
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -28,6 +28,29 @@ export async function writeObject(home, data) {
   await mkdir(join(home, 'attachments', 'v1', 'objects', sha.slice(0, 2)), { recursive: true })
   await writeFile(path, buffer)
   return { sha, bytes: buffer.length, path }
+}
+
+/**
+ * Write one generic-file object — PDFs, Office files, archives — exactly like
+ * DSH's file store does: bytes in `file-objects/<prefix>/<sha>` and a read-only
+ * named link in `files/<prefix>/<sha>/<name>`. Returns the object digests.
+ */
+export async function writeFileObject(home, data, name) {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
+  const sha = createHash('sha256').update(buffer).digest('hex')
+  const prefix = sha.slice(0, 2)
+  const objectDir = join(home, 'attachments', 'v1', 'file-objects', prefix)
+  await mkdir(objectDir, { recursive: true })
+  const path = join(objectDir, sha)
+  await writeFile(path, buffer)
+  const refDir = join(home, 'attachments', 'v1', 'files', prefix, sha)
+  await mkdir(refDir, { recursive: true })
+  const refPath = join(refDir, name)
+  await link(path, refPath).catch(async () => {
+    // A filesystem without hard links still gets the reference path.
+    await writeFile(refPath, buffer)
+  })
+  return { sha, bytes: buffer.length, path, refPath }
 }
 
 /** Frame-per-line Zstandard container, exactly like the appender writes. */
@@ -61,6 +84,9 @@ export async function writeSession(home, session) {
   let time = createdAt + 100
   for (const message of session.messages) {
     time = message.time ?? time + 1000
+    // DSH writes image parts with a media type; a generic file part carries only
+    // an id, a name and a byte count, exactly like the real log.
+    const image = typeof message.mime === 'string' && message.mime.startsWith('image/')
     frames.push({
       type: 'user/message',
       seq: seq += 1,
@@ -68,12 +94,12 @@ export async function writeSession(home, session) {
       data: {
         content: [
           {
-            type: message.mime.startsWith('image/') ? 'image' : 'file',
+            type: image ? 'image' : 'file',
             attachment: {
               attachmentId: `sha256:${message.sha}`,
-              mediaType: message.mime,
+              ...(image ? { mediaType: message.mime } : {}),
               bytes: message.bytes,
-              name: message.name,
+              ...(typeof message.name === 'string' && message.name !== '' ? { name: message.name } : {}),
             },
           },
           { type: 'text', text: `Please look at ${message.name}` },
